@@ -1,193 +1,155 @@
-import { useEffect, useRef, useState } from 'react'
-import './App.css'
+import { useState, useRef, useEffect } from "react";
+import "./App.css";
 
-type GenerationResult = {
-  code: string
-  mode: string
-  latency: string
-}
-
-type TaskResponse = {
-  task_id: string
-}
-
-type TaskStatus = {
-  status: 'pending' | 'running' | 'completed' | 'failed'
-  result?: GenerationResult
-  error?: string
-}
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+};
 
 function App() {
-  const [prompt, setPrompt] = useState('')
-  const [language, setLanguage] = useState('python')
-  const [result, setResult] = useState<GenerationResult | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [taskId, setTaskId] = useState<string | null>(null)
-  const [status, setStatus] = useState<TaskStatus['status'] | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [isPolling, setIsPolling] = useState(false)
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Chat State
+  const [messages, setMessages] = useState<Message[]>([{ role: "assistant", content: "Hello! I am your Vibe Coding assistant. Describe what you want to build." }]);
+  const [input, setInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const clearPolling = () => {
-    if (pollTimerRef.current) {
-      clearTimeout(pollTimerRef.current)
-      pollTimerRef.current = null
-    }
-  }
+  // Code Preview State
+  const [displayedCode, setDisplayedCode] = useState("// Your generated code will appear here...");
+  const [fullCode, setFullCode] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
 
+  // Auto-scroll chat
   useEffect(() => {
-    return () => clearPolling()
-  }, [])
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
-  const pollTask = async (id: string) => {
-    try {
-      const response = await fetch(`/api/tasks/${id}`)
-      if (!response.ok) {
-        const message = await response.text()
-        throw new Error(message || '获取任务状态失败')
-      }
-      const data = (await response.json()) as TaskStatus
-      setStatus(data.status)
-
-      if (data.status === 'completed' && data.result) {
-        setResult(data.result)
-        setIsPolling(false)
-        clearPolling()
-        return
-      }
-
-      if (data.status === 'failed') {
-        setError(data.error ?? '任务失败')
-        setIsPolling(false)
-        clearPolling()
-        return
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '获取任务状态失败')
-      setIsPolling(false)
-      clearPolling()
-      return
+  // Typewriter Effect Logic
+  useEffect(() => {
+    if (isTyping && fullCode.length > displayedCode.length) {
+      const timeout = setTimeout(() => {
+        setDisplayedCode(fullCode.slice(0, displayedCode.length + 5));
+      }, 10);
+      return () => clearTimeout(timeout);
+    } else if (isTyping && fullCode.length === displayedCode.length) {
+      setIsTyping(false);
     }
+  }, [displayedCode, fullCode, isTyping]);
 
-    pollTimerRef.current = setTimeout(() => pollTask(id), 500)
-  }
+  const handleSend = async () => {
+    if (!input.trim() || isSending) return;
 
-  const handleGenerate = async () => {
-    const trimmed = prompt.trim()
-    if (!trimmed) {
-      setError('请先输入需求描述')
-      setResult(null)
-      return
-    }
-
-    setIsLoading(true)
-    setIsPolling(false)
-    clearPolling()
-    setError(null)
-    setResult(null)
-    setTaskId(null)
-    setStatus('pending')
+    const userMessage = input.trim();
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+    setIsSending(true);
+    setDisplayedCode(""); // Clear previous code
+    setFullCode("");
 
     try {
-      const response = await fetch('/api/generate/task', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          prompt: trimmed,
-          language,
-        }),
-      })
+      // 1. Submit Task
+      const response = await fetch("/api/generate/task", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: userMessage, language: "python" }),
+      });
 
-      if (!response.ok) {
-        const message = await response.text()
-        throw new Error(message || '请求失败')
-      }
+      if (!response.ok) throw new Error("Failed to start generation");
 
-      const data = (await response.json()) as TaskResponse
-      setTaskId(data.task_id)
-      setStatus('pending')
-      setIsPolling(true)
-      pollTask(data.task_id)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '请求失败')
-      setStatus(null)
-      setIsPolling(false)
-    } finally {
-      setIsLoading(false)
+      const { task_id } = await response.json();
+
+      // 2. Poll for Result
+      const pollInterval = setInterval(async () => {
+        try {
+          const taskRes = await fetch(`/api/tasks/${task_id}`);
+          const taskData = await taskRes.json();
+
+          if (taskData.status === "completed" && taskData.result) {
+            clearInterval(pollInterval);
+
+            // Start "Streaming" effect
+            setFullCode(taskData.result.code);
+            setIsTyping(true);
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: `Code generated! (Latency: ${taskData.result.latency})`,
+              },
+            ]);
+            setIsSending(false);
+          } else if (taskData.status === "failed") {
+            clearInterval(pollInterval);
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: `Error: ${taskData.error}`,
+              },
+            ]);
+            setIsSending(false);
+          }
+        } catch (err) {
+          clearInterval(pollInterval);
+          setIsSending(false);
+        }
+      }, 1000);
+    } catch (error) {
+      console.error(error);
+      setMessages((prev) => [...prev, { role: "assistant", content: "Sorry, something went wrong." }]);
+      setIsSending(false);
     }
-  }
-
-  const handleReset = () => {
-    setPrompt('')
-    setResult(null)
-    setError(null)
-    setTaskId(null)
-    setStatus(null)
-    setIsLoading(false)
-    setIsPolling(false)
-    clearPolling()
-  }
-
-  const isBusy = isLoading || isPolling
+  };
 
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>Vibe Coding 前端原型</h1>
-        <p>提交任务后轮询状态，体验异步生成流程</p>
-      </header>
-
-      <section className="panel">
-        <label className="label">需求描述</label>
-        <textarea
-          className="textarea"
-          rows={6}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          placeholder="例如：生成支持代码高亮的编辑器"
-        />
-        <div className="row">
-          <label className="label">语言</label>
-          <select
-            className="select"
-            value={language}
-            onChange={(event) => setLanguage(event.target.value)}
-          >
-            <option value="python">Python</option>
-            <option value="javascript">JavaScript</option>
-            <option value="typescript">TypeScript</option>
-          </select>
+      {/* Left Panel: Chat Interface */}
+      <div className="chat-panel">
+        <div className="chat-header">Vibe Coding Assistant</div>
+        <div className="chat-messages">
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`message ${msg.role}`}>
+              {msg.content}
+            </div>
+          ))}
+          {isSending && <div className="message assistant">Thinking & Generating...</div>}
+          <div ref={messagesEndRef} />
         </div>
-        <div className="actions">
-          <button className="btn primary" onClick={handleGenerate} disabled={isBusy}>
-            {isBusy ? '生成中...' : '提交任务'}
-          </button>
-          <button className="btn" onClick={handleReset} disabled={isLoading}>
-            清空
+        <div className="input-area">
+          <textarea
+            className="chat-input"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            placeholder="Describe your code requirements..."
+            rows={1}
+          />
+          <button className="send-btn" onClick={handleSend} disabled={isSending || !input.trim()}>
+            Send
           </button>
         </div>
-      </section>
+      </div>
 
-      <section className="panel">
-        <label className="label">生成结果</label>
-        <div className="output">
-          {error ? <div className="error">{error}</div> : null}
-          <div className="meta">
-            task: {taskId ?? '-'} | status: {status ?? '-'}
-          </div>
-          {result ? (
-            <pre>{result.code}</pre>
-          ) : !error && status ? (
-            <span className="placeholder">任务处理中...</span>
-          ) : !error ? (
-            <span className="placeholder">等待生成</span>
-          ) : null}
+      {/* Right Panel: Code Preview */}
+      <div className="preview-panel">
+        <div className="preview-header">
+          <span className="preview-title">main.py (Generated)</span>
+          <button className="copy-btn" onClick={() => navigator.clipboard.writeText(fullCode)}>
+            Copy Code
+          </button>
         </div>
-      </section>
+        <div className="code-editor">
+          {displayedCode}
+          {isTyping && <span className="cursor">|</span>}
+        </div>
+      </div>
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
