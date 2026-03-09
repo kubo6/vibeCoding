@@ -17,6 +17,7 @@ function App() {
   const [displayedCode, setDisplayedCode] = useState("// Your generated code will appear here...");
   const [fullCode, setFullCode] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [token, setToken] = useState<string | null>(null);
 
   // Auto-scroll chat
   useEffect(() => {
@@ -35,6 +36,25 @@ function App() {
     }
   }, [displayedCode, fullCode, isTyping]);
 
+  const ensureToken = async () => {
+    let t = localStorage.getItem("vc_token");
+    if (t) {
+      setToken(t);
+      return t;
+    }
+    const uname = `user_${Math.random().toString(36).slice(2, 8)}`;
+    const resp = await fetch("/api/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: uname, password: uname, email: `${uname}@local` }),
+    });
+    if (!resp.ok) throw new Error("register_failed");
+    const data = await resp.json();
+    localStorage.setItem("vc_token", data.access_token);
+    setToken(data.access_token);
+    return data.access_token;
+  };
+
   const handleSend = async () => {
     if (!input.trim() || isSending) return;
 
@@ -46,10 +66,11 @@ function App() {
     setFullCode("");
 
     try {
+      const tk = await ensureToken();
       // 1. Submit Task
       const response = await fetch("/api/generate/task", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tk}` },
         body: JSON.stringify({ prompt: userMessage, language: "python" }),
       });
 
